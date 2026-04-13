@@ -116,8 +116,6 @@ int main(int argc, char* argv[]) {
                       robot_control_bridge_config.task_settings_file());
   params.emplace_back("joint_task_settings_file",
                       robot_control_bridge_config.joint_task_settings_file());
-  params.emplace_back("use_sim_time",
-                      robot_control_bridge_config.use_sim_time());
 
   options.parameter_overrides(params);
 

@@ -9,7 +9,6 @@ message RobotControlBridgeConfig {
   string part_name = 3;
   string task_settings_file = 4;
   string joint_task_settings_file = 5;
-  bool use_sim_time = 6;
 }
 
 // Configuration to control which sensors are enabled to publish ROS 2 messages.

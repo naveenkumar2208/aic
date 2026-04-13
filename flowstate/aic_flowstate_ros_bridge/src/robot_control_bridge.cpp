@@ -294,38 +294,11 @@ bool RobotControlBridge::initialize(
         data_->controller_state_pub_->publish(data_->controller_state_);
       });
 
-  // Add a clock jump callback to detect when the clock jump, which is triggered
-  // by a "reset to initial" for the Flowstate scene
-  rcl_jump_threshold_t jump_threshold;
-  jump_threshold.on_clock_change = true;
-  // Values of 0 would disable callbacks from forward time jumps.
-  jump_threshold.min_forward.nanoseconds = 0;
-  // Trigger restart of controller bridge if the time jumps backward by at least
-  // 1 second
-  jump_threshold.min_backward.nanoseconds = 1 * (-1000000000);
-  data_->jump_handler_ =
-      data_->node_interfaces_
-          .get<rclcpp::node_interfaces::NodeClockInterface>()
-          ->get_clock()
-          ->create_jump_callback(
-              nullptr,
-              [this](const rcl_time_jump_t&) {
-                LOG(WARNING)
-                    << "Jump in time detected due to reset! Proceeding to "
-                       "restart the controller bridge.";
-                if (!this->restartControllerBridge()) {
-                  LOG(INFO) << "Failed to restart controller bridge.";
-                }
-              },
-              jump_threshold);
-
   LOG(INFO) << "Connecting to ICON server: " << data_->server_address_
             << ", instance: " << data_->instance_
             << ", part: " << data_->part_name_;
 
-  if (!restartControllerBridge()) {
-    throw std::runtime_error("Failed to start controller bridge.");
-  }
+  restartControllerBridge();
 
   LOG(INFO) << "Initialized RobotControlBridge.";
 
@@ -510,6 +483,17 @@ void RobotControlBridge::RobotStateCallback(
         << "Error: Unable to find robot part [" << data_->part_name_
         << "] within robot_status message!";
   }
+
+  const auto& current_timestamp_ns = icon_robot_status.timestamp_ns();
+
+  if (data_->last_part_status_timestamp_ns_.has_value() &&
+      current_timestamp_ns < data_->last_part_status_timestamp_ns_.value()) {
+    LOG(WARNING) << "Jump backward in time detected for controller server "
+                    "timestamp, indicating a reset. Proceeding to restart the "
+                    "controller bridge.";
+    restartControllerBridge();
+  }
+  data_->last_part_status_timestamp_ns_ = current_timestamp_ns;
 }
 
 ///=============================================================================
@@ -518,17 +502,14 @@ void RobotControlBridge::RestartBridgeCallback(
     std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
   LOG(INFO) << "Received request to restart controller bridge";
 
-  if (!restartControllerBridge()) {
-    response->success = false;
-    response->message = "Failed to restart the controller bridge";
-  }
+  restartControllerBridge();
 
   response->success = true;
-  response->message = "Successfully restarted controller bridge";
+  response->message = "Restarting controller bridge...";
 }
 
 ///=============================================================================
-bool RobotControlBridge::restartControllerBridge() {
+void RobotControlBridge::restartControllerBridge() {
   // Stop all currently running actions
   if (data_->session_) {
     auto status = data_->session_->StopAllActions();
@@ -545,22 +526,44 @@ bool RobotControlBridge::restartControllerBridge() {
   data_->agent_bridge_writer_.reset();
   data_->agent_bridge_joint_writer_.reset();
 
-  if (!startControllerSession()) {
-    LOG(ERROR) << "Failed to start ICON client and session";
-    return false;
-  }
+  // Create a timer to retry connecting to the controller server to avoid
+  // blocking other callbacks
+  if (data_->retry_connection_timer_.get() == nullptr) {
+    // todo(johntgz) remove ;pg after debug
+    LOG(INFO)
+        << "Starting a timer to retry connecting to the controller server";
+    data_->retry_connection_timer_ = rclcpp::create_timer(
+        data_->node_interfaces_
+            .get<rclcpp::node_interfaces::NodeBaseInterface>(),
+        data_->node_interfaces_
+            .get<rclcpp::node_interfaces::NodeTimersInterface>(),
+        data_->node_interfaces_
+            .get<rclcpp::node_interfaces::NodeClockInterface>()
+            ->get_clock(),
+        50ms, [this]() -> void {
+          if (!startControllerSession()) {
+            LOG(ERROR) << "Failed to start ICON client and session. Retrying "
+                          "connection...";
+            return;
+          }
 
-  if (!resetMotionUpdate()) {
-    LOG(ERROR) << "Failed to reset MotionUpdate and JointMotionUpdate commands";
-    return false;
-  }
+          if (!resetMotionUpdate()) {
+            LOG(ERROR) << "Failed to reset MotionUpdate and JointMotionUpdate "
+                          "commands. Retrying connection...";
+            return;
+          }
 
-  if (!startControllerAction()) {
-    LOG(ERROR) << "Failed to add and start AgentBridge actions";
-    return false;
-  }
+          if (!startControllerAction()) {
+            LOG(ERROR) << "Failed to add and start AgentBridge actions. "
+                          "Retrying connection...";
+            return;
+          }
 
-  return true;
+          LOG(INFO) << "Successfully established a connection to the "
+                       "controller server!";
+          data_->retry_connection_timer_.reset();
+        });
+  }
 }
 
 ///=============================================================================
@@ -1103,6 +1106,7 @@ RobotControlBridge::Data::~Data() {
   restart_bridge_srv_.reset();
   controller_state_pub_.reset();
   controller_state_timer_.reset();
+  retry_connection_timer_.reset();
 }
 }  // namespace flowstate_ros_bridge
 

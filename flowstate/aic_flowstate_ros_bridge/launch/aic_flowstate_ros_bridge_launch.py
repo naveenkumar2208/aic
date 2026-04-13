@@ -77,7 +77,6 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "use_sim_time": True,
                         "autostart": True,
                         "service_tunnel": LaunchConfiguration("service_tunnel"),
                         "flowstate_zenoh_router_address": LaunchConfiguration(

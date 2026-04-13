@@ -38,7 +38,6 @@ export INTRINSIC_CLUSTER="vmp-xxxx-xxxxxxx"
   $SERVICE_BUNDLE
 ```
 
-<!-- todo(johntgz) documentation -->
 ## ROS 2 Interfaces
 
 ### Services

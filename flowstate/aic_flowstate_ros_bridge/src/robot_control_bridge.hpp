@@ -110,12 +110,11 @@ class RobotControlBridge : public BridgeInterface {
   bool resetMotionUpdate();
 
   /**
-   * @brief Restarts the controller bridge
+   * @brief Restarts the controller bridge. Creates a timer to retry connecting
+   * to the controller server to avoid blocking other callbacks.
    *
-   * @return true
-   * @return false
    */
-  bool restartControllerBridge();
+  void restartControllerBridge();
 
   absl::StatusOr<std::shared_ptr<intrinsic::Subscription>>
   CreateActionOutputStreamSubscription(
@@ -150,6 +149,7 @@ class RobotControlBridge : public BridgeInterface {
   struct Data : public std::enable_shared_from_this<Data> {
     ROSNodeInterfaces node_interfaces_;
 
+    // Controller Server
     std::unique_ptr<Session> session_;
     intrinsic::icon::AgentBridgeInfo::FixedParams agent_bridge_fixed_params_;
     intrinsic::icon::AgentBridgeJointInfo::FixedParams
@@ -163,8 +163,8 @@ class RobotControlBridge : public BridgeInterface {
         intrinsic_proto::icon::actions::proto::JointMotionUpdate>>
         agent_bridge_joint_writer_;
 
+    // Intrinsic pubsub
     std::shared_ptr<intrinsic::PubSub> pubsub_;
-
     std::shared_ptr<intrinsic::Subscription> agent_bridge_output_stream_sub_;
     std::shared_ptr<intrinsic::Subscription>
         agent_bridge_joint_output_stream_sub_;
@@ -183,16 +183,16 @@ class RobotControlBridge : public BridgeInterface {
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr restart_bridge_srv_;
 
     rclcpp::TimerBase::SharedPtr controller_state_timer_;
-
-    // Handler for clock jumps
-    rclcpp::JumpHandler::SharedPtr jump_handler_;
+    rclcpp::TimerBase::SharedPtr retry_connection_timer_;
 
     std::string part_name_;
     std::string instance_;
     std::string server_address_;
+    int num_retry_connect_;
     std::size_t num_joints_;
     uint8_t target_mode_value_ =
         aic_control_interfaces::msg::TargetMode::MODE_UNSPECIFIED;
+    std::optional<int64_t> last_part_status_timestamp_ns_ = 0;
 
     aic_control_interfaces::msg::ControllerState controller_state_;
     std::mutex controller_state_mutex_;
