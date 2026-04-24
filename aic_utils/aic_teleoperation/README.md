@@ -1,12 +1,12 @@
 # aic_teleoperation
 
-Keyboard-based teleoperation for the robot in both joint-space and Cartesian-space control modes.
+Keyboard- and gamepad-based teleoperation for the robot in joint-space and Cartesian-space control modes.
 
 ## Prerequisites
 
 1. Follow the [Getting Started Guide](../../docs/getting_started.md) to set up your development environment
 2. X11 display server (pynput has known issues with Wayland)
-3. For native builds: `sudo apt install python3-pynput` (pixi installs automatically)
+3. For native builds: `sudo apt install python3-pynput` (pixi installs `pynput` and `pygame` automatically)
 
 ## Available Scripts
 
@@ -29,7 +29,50 @@ Control individual robot joints directly.
 **Exit:**
 - `ESC` - Quit teleoperation
 
-### 2. Cartesian Space Teleoperation (`cartesian_keyboard_teleop`)
+### 2. Gamepad Joint Teleoperation (`gamepad_joint_teleop`)
+
+Control joints with an **Xbox** or **PlayStation** gamepad. On launch, choose layout `1` or `2` so axis indices match your controller.
+
+**Sticks**
+
+| Input | Joint | Robot |
+|-------|-------|--------|
+| Left stick ↔ | ± | 1 — shoulder_pan |
+| Left stick ↕ | ± | 2 — shoulder_lift |
+| Right stick ↔ | ± | 3 — elbow |
+| Right stick ↕ | ± | 4 — wrist_1 |
+
+**Triggers (joint 5 — wrist_2)**
+
+| Input | Effect |
+|-------|--------|
+| Right trigger stronger | +velocity |
+| Left trigger stronger | −velocity |
+
+**Bumpers (joint 6 — wrist_3)**
+
+| Input | Effect |
+|-------|--------|
+| LB / L1 | −velocity |
+| RB / R1 | +velocity |
+
+**D-pad (speed, same rad/s as keyboard teleop)**
+
+| Input | Effect |
+|-------|--------|
+| D-pad **up** | Slow (0.075 rad/s) |
+| D-pad **down** | Fast (0.2 rad/s) |
+
+**Quit**
+
+| Layout | Action |
+|--------|--------|
+| Xbox | Hold **View + Menu** |
+| PlayStation | Hold **Share + Options** |
+
+You can also press **Ctrl+C** in the terminal. If sticks or triggers map wrong for your OS/driver, try the other layout or edit `GAMEPAD_PROFILES` in `gamepad_joint_teleop.py`.
+
+### 3. Cartesian Space Teleoperation (`cartesian_keyboard_teleop`)
 
 Control end-effector pose (position and orientation).
 
@@ -66,6 +109,8 @@ cd ~/ws_aic/src/aic
 # Run teleoperation
 pixi run ros2 run aic_teleoperation joint_keyboard_teleop
 # or
+pixi run ros2 run aic_teleoperation gamepad_joint_teleop
+# or
 pixi run ros2 run aic_teleoperation cartesian_keyboard_teleop
 ```
 
@@ -77,11 +122,13 @@ See [Building the Evaluation Component from Source](../../docs/build_eval.md) fo
 # Run teleoperation
 ros2 run aic_teleoperation joint_keyboard_teleop
 # or
+ros2 run aic_teleoperation gamepad_joint_teleop
+# or
 ros2 run aic_teleoperation cartesian_keyboard_teleop
 ```
 
 ## Notes
 
-- The scripts automatically switch the controller to the appropriate control mode (joint or Cartesian) when started
-- Press ESC to cleanly exit teleoperation
-- Keyboard input will be captured regardless of whether keyboard focus is on the terminal window
+- The scripts automatically switch the robot controller to the appropriate control mode (joint or Cartesian) when started
+- **Keyboard:** Press ESC to exit; input is captured even when the terminal does not have focus
+- **Gamepad:** Exit with the two-button combo in the table above, or Ctrl+C in the terminal

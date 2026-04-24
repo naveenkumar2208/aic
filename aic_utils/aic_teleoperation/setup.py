@@ -11,7 +11,7 @@ setup(
         ("share/" + package_name, ["package.xml"]),
     ],
     package_data={"": ["py.typed"]},
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "numpy", "pygame>=2.5"],
     zip_safe=True,
     maintainer="johntangz",
     maintainer_email="johntangz@intrinsic.ai",
@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "cartesian_keyboard_teleop = aic_teleoperation.cartesian_keyboard_teleop:main",
+            "gamepad_joint_teleop = aic_teleoperation.gamepad_joint_teleop:main",
             "joint_keyboard_teleop = aic_teleoperation.joint_keyboard_teleop:main",
         ],
     },
