@@ -1,6 +1,6 @@
 # aic_teleoperation
 
-Keyboard- and gamepad-based teleoperation for the robot in joint-space and Cartesian-space control modes.
+Keyboard-, gamepad-, and scripted ground-truth teleoperation for the robot (joint-space, Cartesian-space, and CheatCode-style insertion).
 
 ## Prerequisites
 
@@ -72,7 +72,17 @@ Control joints with an **Xbox** or **PlayStation** gamepad. On launch, choose la
 
 You can also press **Ctrl+C** in the terminal. If sticks or triggers map wrong for your OS/driver, try the other layout or edit `GAMEPAD_PROFILES` in `gamepad_joint_teleop.py`.
 
-### 3. Cartesian Space Teleoperation (`cartesian_keyboard_teleop`)
+### 3. Ground-truth scripted insertion (`cheatcode_ground_truth_teleop`)
+
+Runs the same plug-in-port logic as [`CheatCode.py`](../../aic_example_policies/aic_example_policies/ros/CheatCode.py) by publishing Cartesian **pose** commands to `aic_controller` (no keyboard or SpaceMouse). Use when the simulator publishes **ground-truth TF** for the port and plug (launch with `ground_truth:=true`; see [`aic_bringup/README.md`](../../aic_bringup/README.md) for spawning the task board and cable).
+
+Default TF names match [`sample_config.yaml`](../../aic_engine/config/sample_config.yaml) trial 1 (`cable_0`, `sfp_tip`, **`nic_card_mount_0`**, `sfp_port_0`). If you spawn a different mount (e.g. `nic_card_mount_2_present:=true` on `aic_gz_bringup`), set **`-p target_module_name:=nic_card_mount_2`** so the port frame matches the board (`task_board/nic_card_mount_2/sfp_port_0_link`). Ground truth must stay on (`ground_truth:=true`).
+
+**Parameters:** `controller_namespace`, `cable_name`, `plug_name`, `port_name`, `target_module_name`, `task_id`, `startup_delay_sec`.
+
+The node exits after one insertion attempt (success or failure). This is useful for scripted demos or generating consistent motion (similar in spirit to community workflows that use CheatCode for data-related experiments, e.g. [Open Robotics Discourse](https://discourse.openrobotics.org/t/rockys-open-source-build-thread-ai-for-industry-challenge/53155/11)).
+
+### 4. Cartesian Space Teleoperation (`cartesian_keyboard_teleop`)
 
 Control end-effector pose (position and orientation).
 
@@ -111,6 +121,8 @@ pixi run ros2 run aic_teleoperation joint_keyboard_teleop
 # or
 pixi run ros2 run aic_teleoperation gamepad_joint_teleop
 # or
+pixi run ros2 run aic_teleoperation cheatcode_ground_truth_teleop --ros-args -p use_sim_time:=true
+# or
 pixi run ros2 run aic_teleoperation cartesian_keyboard_teleop
 ```
 
@@ -123,6 +135,8 @@ See [Building the Evaluation Component from Source](../../docs/build_eval.md) fo
 ros2 run aic_teleoperation joint_keyboard_teleop
 # or
 ros2 run aic_teleoperation gamepad_joint_teleop
+# or
+ros2 run aic_teleoperation cheatcode_ground_truth_teleop --ros-args -p use_sim_time:=true
 # or
 ros2 run aic_teleoperation cartesian_keyboard_teleop
 ```

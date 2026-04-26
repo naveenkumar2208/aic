@@ -8168,7 +8168,11 @@ packages:
     target_platform: osx-arm64
   depends:
   - ros-kilted-aic-control-interfaces
+  - ros-kilted-aic-example-policies
+  - ros-kilted-aic-model-interfaces
+  - ros-kilted-aic-task-interfaces
   - ros-kilted-geometry-msgs
+  - ros-kilted-tf2-ros
   - ros-kilted-rclpy
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.14.0,<0.15.0a0
@@ -8185,7 +8189,11 @@ packages:
     target_platform: linux-64
   depends:
   - ros-kilted-aic-control-interfaces
+  - ros-kilted-aic-example-policies
+  - ros-kilted-aic-model-interfaces
+  - ros-kilted-aic-task-interfaces
   - ros-kilted-geometry-msgs
+  - ros-kilted-tf2-ros
   - ros-kilted-rclpy
   - ros2-distro-mutex
   - ros2-distro-mutex >=0.14.0,<0.15.0a0

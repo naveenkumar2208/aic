@@ -20,6 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "cartesian_keyboard_teleop = aic_teleoperation.cartesian_keyboard_teleop:main",
+            "cheatcode_ground_truth_teleop = aic_teleoperation.cheatcode_ground_truth_teleop:main",
             "gamepad_joint_teleop = aic_teleoperation.gamepad_joint_teleop:main",
             "joint_keyboard_teleop = aic_teleoperation.joint_keyboard_teleop:main",
         ],

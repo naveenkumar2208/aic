@@ -95,6 +95,7 @@ ros2 launch aic_bringup aic_gz_bringup.launch.py [parameters]
 
 **Task Board Configuration:**
 - `spawn_task_board` (default: `"false"`) - Whether to spawn the task board
+- `nic_card_mount_0_present` … `nic_card_mount_4_present` (default: `"false"`) — Enable NIC card mounts on the board; each mount also accepts `nic_card_mount_N_{translation,roll,pitch,yaw}` (same defaults as `spawn_task_board.launch.py`). These are **forwarded** from `aic_gz_bringup.launch.py` into `spawn_task_board` (previously only pose/description were passed, so mount flags on the main bringup had no effect).
 - `task_board_description_file` (default: `"task_board.urdf.xacro"`) - Task board URDF/XACRO file
 - `task_board_x` (default: `"0.15"`) - Task board spawn X position (meters)
 - `task_board_y` (default: `"-0.2"`) - Task board spawn Y position (meters)
