@@ -26,6 +26,7 @@ import cv2
 import draccus
 from pathlib import Path
 from typing import Callable, Dict, Any, List
+from rclpy.exceptions import ParameterAlreadyDeclaredException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, Vector3
 
@@ -51,10 +52,66 @@ from safetensors.torch import load_file
 from huggingface_hub import snapshot_download
 
 
+def _cuda_runtime_ok() -> bool:
+    """True if this PyTorch build can actually run ops on the current GPU (not just torch.cuda.is_available())."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        a = torch.randn(32, 32, device="cuda", dtype=torch.float32)
+        b = torch.randn(32, 32, device="cuda", dtype=torch.float32)
+        (a @ b).sum().item()
+        torch.cuda.synchronize()
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_act_device(
+    parent_node: Node, logger
+) -> torch.device:
+    """Env ``AIC_RUN_ACT_DEVICE`` (cpu|cuda) overrides; else ROS param ``act_device`` (auto|cpu|cuda)."""
+    env = os.environ.get("AIC_RUN_ACT_DEVICE", "").strip().lower()
+    if env == "cpu":
+        return torch.device("cpu")
+    if env == "cuda":
+        if _cuda_runtime_ok():
+            return torch.device("cuda")
+        logger.warning("AIC_RUN_ACT_DEVICE=cuda but CUDA is not usable; using CPU.")
+        return torch.device("cpu")
+
+    try:
+        mode = parent_node.get_parameter("act_device").get_parameter_value().string_value
+        mode = (mode or "auto").strip().lower()
+    except Exception:
+        mode = "auto"
+    if mode not in ("auto", "cpu", "cuda"):
+        mode = "auto"
+
+    if mode == "cpu":
+        return torch.device("cpu")
+    if mode == "cuda":
+        if _cuda_runtime_ok():
+            return torch.device("cuda")
+        logger.warning("act_device=cuda but CUDA is not usable; using CPU.")
+        return torch.device("cpu")
+    if _cuda_runtime_ok():
+        return torch.device("cuda")
+    logger.warning(
+        "act_device=auto: CUDA is not usable with this PyTorch (e.g. RTX 50 / sm_120 "
+        "with an older torch). Using CPU. For GPU, install a PyTorch build for your "
+        "architecture, or set AIC_RUN_ACT_DEVICE=cpu to silence this message."
+    )
+    return torch.device("cpu")
+
+
 class RunACT(Policy):
     def __init__(self, parent_node: Node):
         super().__init__(parent_node)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            parent_node.declare_parameter("act_device", "auto")
+        except ParameterAlreadyDeclaredException:
+            pass
+        self.device = _resolve_act_device(parent_node, self.get_logger())
 
         # -------------------------------------------------------------------------
         # 1. Configuration & Weights Loading
