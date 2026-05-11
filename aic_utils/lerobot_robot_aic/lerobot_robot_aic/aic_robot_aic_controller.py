@@ -23,7 +23,6 @@ from functools import cached_property
 from threading import Thread
 from typing import Any, Callable, TypedDict, cast
 
-import cv2
 import numpy as np
 import rclpy
 from aic_control_interfaces.msg import (
@@ -357,6 +356,8 @@ class AICRobotAICController(Robot):
                 if data is not None and data.size > 0:
                     image_scale = self.config.camera_image_scaling[cam_key]
                     if image_scale != 1:
+                        import cv2
+
                         cam_obs[cam_key] = cv2.resize(
                             data,
                             None,

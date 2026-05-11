@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 
+import time
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Any, cast
@@ -346,11 +347,141 @@ class AICSpaceMouseTeleop(Teleoperator):
 # ==============================================================================
 # START OF NEW ADDITION: AICCheatCodeTeleop (Simplified)
 # ==============================================================================
+import logging
+import sys
+import weakref
+
 import numpy as np
 from aic_model_interfaces.msg import Observation
 from scipy.spatial.transform import Rotation as R
 from tf2_ros import Buffer, TransformListener
 from transforms3d._gohlketransforms import quaternion_multiply
+
+# Weak ref to the connected AICCheatCodeTeleop; LeRobot's single pynput listener calls these hooks.
+_cheatcode_keyboard_target: weakref.ReferenceType | None = None
+_lerobot_record_keyboard_patched: bool = False
+
+
+def _cheatcode_keyboard_target_live() -> "AICCheatCodeTeleop | None":
+    ref = _cheatcode_keyboard_target
+    if ref is None:
+        return None
+    return ref()
+
+
+def _cheatcode_apply_operator_stop(source: str) -> None:
+    teleop = _cheatcode_keyboard_target_live()
+    if teleop is None or not teleop.config.enable_operator_stop_keys:
+        return
+    if teleop.phase != "STOPPED":
+        print(f"[CheatCode] {source}: operator stop — zero motion until ']'.")
+    teleop.phase = "STOPPED"
+    teleop._lin_err_integrator[:] = 0.0
+    teleop._force_exceed_start_time = None
+    teleop._insertion_depth_reached_time = None
+    teleop._set_zero_action()
+
+
+def _cheatcode_on_lerobot_right_arrow() -> None:
+    _cheatcode_apply_operator_stop("Right arrow (LeRobot)")
+
+
+def _cheatcode_on_lerobot_escape() -> None:
+    _cheatcode_apply_operator_stop("Escape (LeRobot)")
+
+
+def _cheatcode_on_lerobot_left_arrow() -> None:
+    teleop = _cheatcode_keyboard_target_live()
+    if teleop is None or not teleop.config.enable_operator_stop_keys:
+        return
+    if teleop.phase == "STOPPED":
+        print("[CheatCode] Left arrow (LeRobot): re-arming CheatCode from INIT.")
+        teleop._rearm_state_machine()
+
+
+def _cheatcode_on_close_bracket_key() -> None:
+    teleop = _cheatcode_keyboard_target_live()
+    if teleop is None or not teleop.config.enable_operator_stop_keys:
+        return
+    if teleop.phase == "STOPPED":
+        print("[CheatCode] ']': re-arming CheatCode from INIT.")
+        teleop._rearm_state_machine()
+
+
+def _ensure_lerobot_record_keyboard_patch() -> bool:
+    """Patch lerobot_record's init_keyboard_listener so CheatCode shares LeRobot's pynput listener.
+
+    LeRobot does ``from control_utils import init_keyboard_listener`` (bound at import time).
+    Only ``lerobot.scripts.lerobot_record.init_keyboard_listener`` must be replaced.
+
+    Returns True if the patch is active for this process.
+    """
+    global _lerobot_record_keyboard_patched
+    if _lerobot_record_keyboard_patched:
+        return True
+    lr = sys.modules.get("lerobot.scripts.lerobot_record")
+    if lr is None:
+        return False
+
+    def init_keyboard_listener():
+        from lerobot.utils.control_utils import is_headless
+
+        events: dict[str, bool] = {}
+        events["exit_early"] = False
+        events["rerecord_episode"] = False
+        events["stop_recording"] = False
+
+        if is_headless():
+            logging.warning(
+                "Headless environment detected. On-screen cameras display and "
+                "keyboard inputs will not be available."
+            )
+            return None, events
+
+        from pynput import keyboard
+
+        def on_press(key):
+            try:
+                if key == keyboard.Key.right:
+                    _cheatcode_on_lerobot_right_arrow()
+                    print("Right arrow key pressed. Exiting loop...")
+                    events["exit_early"] = True
+                elif key == keyboard.Key.left:
+                    _cheatcode_on_lerobot_left_arrow()
+                    print(
+                        "Left arrow key pressed. Exiting loop and rerecord the last episode..."
+                    )
+                    events["rerecord_episode"] = True
+                    events["exit_early"] = True
+                elif key == keyboard.Key.esc:
+                    _cheatcode_on_lerobot_escape()
+                    print("Escape key pressed. Stopping data recording...")
+                    events["stop_recording"] = True
+                    events["exit_early"] = True
+                elif getattr(key, "char", None) == "]":
+                    _cheatcode_on_close_bracket_key()
+            except Exception as e:
+                print(f"Error handling key press: {e}")
+
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+        return listener, events
+
+    lr.init_keyboard_listener = init_keyboard_listener
+    _lerobot_record_keyboard_patched = True
+    return True
+
+
+def _register_cheatcode_keyboard_target(teleop: "AICCheatCodeTeleop") -> None:
+    global _cheatcode_keyboard_target
+    _cheatcode_keyboard_target = weakref.ref(teleop)
+
+
+def _unregister_cheatcode_keyboard_target(teleop: "AICCheatCodeTeleop") -> None:
+    global _cheatcode_keyboard_target
+    ref = _cheatcode_keyboard_target
+    if ref is not None and ref() is teleop:
+        _cheatcode_keyboard_target = None
 
 
 @TeleoperatorConfig.register_subclass("aic_cheatcode")
@@ -389,14 +520,28 @@ class AICCheatCodeTeleopConfig(TeleoperatorConfig):
     task_module_name: str = "nic_card_mount_0"
     task_port_name: str = "sfp_port_0"
 
+    # Right/Esc: zero motion via LeRobot's listener (lerobot-record). ']' re-arms. Disable: false.
+    enable_operator_stop_keys: bool = True
+
+    # Frame of linear/angular velocity keys in get_action() / MotionUpdate (must match
+    # --robot.teleop_frame_id). CheatCode always *computes* PI in base_link ("world"); by
+    # default it rotates that twist into gripper/tcp for teleop. Use base_link here to
+    # record/train the same convention as aic_model RunACT (MotionUpdate header base_link).
+    cartesian_output_frame: str = "gripper/tcp"
+
 
 class AICCheatCodeTeleop(Teleoperator):
     def __init__(self, config: AICCheatCodeTeleopConfig):
         super().__init__(config)
         self.config = config
+        if config.cartesian_output_frame not in ("gripper/tcp", "base_link"):
+            raise ValueError(
+                f"cartesian_output_frame must be 'gripper/tcp' or 'base_link', "
+                f"got {config.cartesian_output_frame!r}"
+            )
         self._is_connected = False
 
-        # State machine: INIT -> APPROACH -> ALIGN -> INSERT -> DONE
+        # State machine: INIT -> APPROACH -> ALIGN -> INSERT -> DONE | STOPPED (operator)
         self.phase = "INIT"
         self.z_offset = config.approach_height
         self.start_time = 0.0
@@ -440,6 +585,16 @@ class AICCheatCodeTeleop(Teleoperator):
     def is_connected(self) -> bool:
         return self._is_connected
 
+    def _rearm_state_machine(self) -> None:
+        """Reset motion state after operator stop (']') or fresh connect."""
+        self.phase = "INIT"
+        self.z_offset = self.config.approach_height
+        self.start_time = 0.0
+        self._last_action_time = None
+        self._insertion_depth_reached_time = None
+        self._force_exceed_start_time = None
+        self._lin_err_integrator = np.zeros(3)
+
     def connect(self, calibrate: bool = True) -> None:
         if self.is_connected:
             raise DeviceAlreadyConnectedError()
@@ -471,10 +626,19 @@ class AICCheatCodeTeleop(Teleoperator):
         self._executor_thread.start()
 
         self._is_connected = True
+        _ensure_lerobot_record_keyboard_patch()
+        _register_cheatcode_keyboard_target(self)
         print(
             f"\n\nCheatCode Teleop connected. "
-            f"Target: {self.config.task_port_name} on {self.config.task_module_name}"
+            f"Target: {self.config.task_port_name} on {self.config.task_module_name}\n"
+            f"  cartesian_output_frame={self.config.cartesian_output_frame!r} — "
+            f"set --robot.teleop_frame_id to the same value for correct control + dataset."
         )
+        if self.config.enable_operator_stop_keys and _lerobot_record_keyboard_patched:
+            print(
+                "[CheatCode] Under lerobot-record: Right/Esc stop motion; "
+                "']' re-arms; Left re-arms if you were stopped."
+            )
 
     def _obs_callback(self, msg: Observation) -> None:
         # Capture tare offset from controller state
@@ -532,6 +696,9 @@ class AICCheatCodeTeleop(Teleoperator):
     def get_action(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError()
+
+        if self.phase == "STOPPED":
+            return self._set_zero_action()
 
         cfg = self.config
         current_time = self._node.get_clock().now().nanoseconds / 1e9
@@ -778,17 +945,21 @@ class AICCheatCodeTeleop(Teleoperator):
             cfg.max_angular_vel,
         )
 
-        # Transform world-frame velocities into TCP-frame velocities
-        v_linear_tcp = r_current.inv().apply(v_linear_world)
-        v_angular_tcp = r_current.inv().apply(v_angular_world)
+        if self.config.cartesian_output_frame == "base_link":
+            v_out_linear = v_linear_world
+            v_out_angular = v_angular_world
+        else:
+            # Transform world-frame velocities into TCP-frame velocities
+            v_out_linear = r_current.inv().apply(v_linear_world)
+            v_out_angular = r_current.inv().apply(v_angular_world)
 
         self._current_actions = {
-            "linear.x": float(v_linear_tcp[0]),
-            "linear.y": float(v_linear_tcp[1]),
-            "linear.z": float(v_linear_tcp[2]),
-            "angular.x": float(v_angular_tcp[0]),
-            "angular.y": float(v_angular_tcp[1]),
-            "angular.z": float(v_angular_tcp[2]),
+            "linear.x": float(v_out_linear[0]),
+            "linear.y": float(v_out_linear[1]),
+            "linear.z": float(v_out_linear[2]),
+            "angular.x": float(v_out_angular[0]),
+            "angular.y": float(v_out_angular[1]),
+            "angular.z": float(v_out_angular[2]),
         }
 
         self._last_action_time = current_time
@@ -798,6 +969,7 @@ class AICCheatCodeTeleop(Teleoperator):
         pass
 
     def disconnect(self) -> None:
+        _unregister_cheatcode_keyboard_target(self)
         self._is_connected = False
         if hasattr(self, "_node"):
             self._node.destroy_node()

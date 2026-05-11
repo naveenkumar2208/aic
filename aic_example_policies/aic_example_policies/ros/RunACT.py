@@ -13,13 +13,25 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
+"""ACT policy for ROS inference.
+
+Weights (first match): env ``AIC_ACT_POLICY_PRETRAINED_PATH``; ROS ``policy_pretrained_path``;
+ROS ``policy_repo_id`` (+ optional ``policy_hf_revision``); else default ``grkw/aic_act_policy``.
+
+After ``lerobot-train``, point at ``<output_dir>/checkpoints/last/pretrained_model`` (or a
+specific step folder). Example::
+
+    export AIC_ACT_POLICY_PRETRAINED_PATH=$PWD/outputs/train/act_run/checkpoints/last/pretrained_model
+    ros2 run aic_model aic_model --ros-args -p policy:=aic_example_policies.ros.RunACT
+"""
 
 import os
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-import time
 import json
+import re
+import time
 import torch
 import numpy as np
 import cv2
@@ -64,6 +76,92 @@ def _cuda_runtime_ok() -> bool:
         return True
     except Exception:
         return False
+
+
+def _normalize_pretrained_dir(path: Path) -> Path:
+    """Accept either .../pretrained_model or .../checkpoints/<step> (parent of pretrained_model)."""
+    if (path / "model.safetensors").is_file():
+        return path.resolve()
+    child = path / "pretrained_model"
+    if (child / "model.safetensors").is_file():
+        return child.resolve()
+    raise FileNotFoundError(
+        f"Expected config.json and model.safetensors under {path} or {child}."
+    )
+
+
+def _find_normalizer_stats_path(pretrained_dir: Path) -> Path:
+    """LeRobot saves ``*_step_<N>_normalizer_processor.safetensors``; step index varies by pipeline."""
+    candidates = list(pretrained_dir.glob("*_normalizer_processor.safetensors"))
+    if not candidates:
+        legacy = pretrained_dir / "policy_preprocessor_step_3_normalizer_processor.safetensors"
+        if legacy.is_file():
+            return legacy
+        raise FileNotFoundError(
+            f"No *normalizer_processor.safetensors under {pretrained_dir}. "
+            "Train with lerobot-train and point policy_pretrained_path at "
+            "checkpoints/<step>/pretrained_model (or checkpoints/last/pretrained_model)."
+        )
+
+    def step_index(p: Path) -> int:
+        m = re.search(r"_step_(\d+)_", p.name)
+        return int(m.group(1)) if m else -1
+
+    return max(candidates, key=step_index)
+
+
+def _resolve_pretrained_policy_dir(parent_node: Node, logger) -> Path:
+    """Directory containing ACT ``config.json``, ``model.safetensors``, and preprocessor stats."""
+    env_path = os.environ.get("AIC_ACT_POLICY_PRETRAINED_PATH", "").strip()
+    if env_path:
+        p = _normalize_pretrained_dir(Path(env_path).expanduser())
+        logger.info(f"ACT weights from AIC_ACT_POLICY_PRETRAINED_PATH: {p}")
+        return p
+
+    try:
+        parent_node.declare_parameter("policy_pretrained_path", "")
+    except ParameterAlreadyDeclaredException:
+        pass
+    try:
+        parent_node.declare_parameter("policy_repo_id", "")
+    except ParameterAlreadyDeclaredException:
+        pass
+    try:
+        parent_node.declare_parameter("policy_hf_revision", "")
+    except ParameterAlreadyDeclaredException:
+        pass
+
+    local = parent_node.get_parameter("policy_pretrained_path").get_parameter_value().string_value.strip()
+    if local:
+        p = _normalize_pretrained_dir(Path(local).expanduser())
+        logger.info(f"ACT weights from policy_pretrained_path: {p}")
+        return p
+
+    repo_id = parent_node.get_parameter("policy_repo_id").get_parameter_value().string_value.strip()
+    if repo_id:
+        revision = parent_node.get_parameter("policy_hf_revision").get_parameter_value().string_value.strip()
+        revision_kw = {"revision": revision} if revision else {}
+        logger.info(f"Downloading ACT weights from Hugging Face repo_id={repo_id!r} ...")
+        p = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["*.json", "*.safetensors"],
+                **revision_kw,
+            )
+        )
+        p = _normalize_pretrained_dir(p)
+        logger.info(f"ACT weights from Hub: {p}")
+        return p
+
+    default_repo = "grkw/aic_act_policy"
+    logger.info(f"No policy path or repo set; using default Hub repo {default_repo!r}")
+    p = Path(
+        snapshot_download(
+            repo_id=default_repo,
+            allow_patterns=["config.json", "model.safetensors", "*.safetensors"],
+        )
+    )
+    return _normalize_pretrained_dir(p)
 
 
 def _resolve_act_device(
@@ -116,15 +214,7 @@ class RunACT(Policy):
         # -------------------------------------------------------------------------
         # 1. Configuration & Weights Loading
         # -------------------------------------------------------------------------
-        repo_id = "grkw/aic_act_policy"
-
-        # Path to your checkpoint folder
-        policy_path = Path(
-            snapshot_download(
-                repo_id=repo_id,
-                allow_patterns=["config.json", "model.safetensors", "*.safetensors"],
-            )
-        )
+        policy_path = _resolve_pretrained_policy_dir(parent_node, self.get_logger())
 
         # Load Config Manually (Fixes 'Draccus' error by removing unknown 'type' field)
         with open(policy_path / "config.json", "r") as f:
@@ -146,9 +236,8 @@ class RunACT(Policy):
         # -------------------------------------------------------------------------
         # 2. Normalization Stats Loading
         # -------------------------------------------------------------------------
-        stats_path = (
-            policy_path / "policy_preprocessor_step_3_normalizer_processor.safetensors"
-        )
+        stats_path = _find_normalizer_stats_path(policy_path)
+        self.get_logger().info(f"Loading preprocessor stats from {stats_path.name}")
         stats = load_file(stats_path)
 
         # Helper to extract and shape stats for broadcasting
