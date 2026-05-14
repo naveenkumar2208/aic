@@ -540,7 +540,10 @@ def _cheatcode_force_abort(
     threshold_n: float,
     phases: frozenset[str] | None,
 ) -> bool:
-    """True if we should discard: force above threshold in an allowed phase (phases=None => any)."""
+    """True if we should discard: force above threshold in an allowed phase.
+
+    phases is None (from --abort-force-phases ALL) => any CheatCode phase matches.
+    """
     if threshold_n <= 0.0:
         return False
     phase = _parse_cheatcode_phase(line)
@@ -684,9 +687,9 @@ def main() -> int:
         "--abort-on-force-greater-than",
         type=float,
         default=20.0,
-        help="When CheatCode logs Force (N) above this, send Left and discard. Only evaluated "
-        "after a successful /aic_controller/tare_force_torque_sensor for this episode. Scoped by "
-        "--abort-force-phases (default APPROACH,ALIGN).",
+        help="When CheatCode logs Force (N) above this on a line with a phase, send Left immediately "
+        "and discard; next loop iteration resets spawn/home per script. Scoped by "
+        "--abort-force-phases (default ALL phases).",
     )
     ap.add_argument(
         "--no-abort-on-high-cheatcode-force",
@@ -695,9 +698,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--abort-force-phases",
-        default="APPROACH,ALIGN",
-        help="Comma-separated CheatCode phases for force abort, or ALL for every phase. "
-        "INSERT routinely exceeds 20N; use ALL only with a higher threshold or intentional early cuts.",
+        default="ALL",
+        help="Comma-separated CheatCode phases for force abort (e.g. APPROACH,ALIGN), or ALL for "
+        "every phase including INSERT. Default ALL: any force above --abort-on-force-greater-than "
+        "discards the episode (Left). Narrow phases if you only want early-phase aborts.",
     )
     ap.add_argument(
         "--sc-plug-name",
@@ -956,14 +960,12 @@ def main() -> int:
             time.sleep(5.0)
             continue
 
-        episode_tare_ok = False
         try:
             subprocess.run(_tare_cmd(pixi), env=env, check=True)
-            episode_tare_ok = True
         except subprocess.CalledProcessError as e:
             print(
                 f"[auto_record] tare failed (continuing anyway): {e}. "
-                "CheatCode force-abort is disabled for this episode until tare succeeds.",
+                "Force-abort still applies from CheatCode logs; fix tare if readings look uncalibrated.",
                 flush=True,
             )
 
@@ -997,6 +999,20 @@ def main() -> int:
             for line in proc.stdout:
                 sys.stdout.write(line)
                 sys.stdout.flush()
+                # Force abort before success: high force must discard even if the same line
+                # could otherwise match a success heuristic.
+                if not args.no_abort_on_high_cheatcode_force and _cheatcode_force_abort(
+                    line,
+                    args.abort_on_force_greater_than,
+                    cheatcode_force_abort_phases,
+                ):
+                    print(
+                        f"[auto_record] CheatCode force > {args.abort_on_force_greater_than}N; "
+                        "discarding episode (Left). Next iteration resets spawn/home per script.",
+                        flush=True,
+                    )
+                    force_aborted = True
+                    break
                 if _is_success_line(line):
                     success = True
                     break
@@ -1015,22 +1031,6 @@ def main() -> int:
                         flush=True,
                     )
                     success = True
-                    break
-                if (
-                    episode_tare_ok
-                    and not args.no_abort_on_high_cheatcode_force
-                    and _cheatcode_force_abort(
-                        line,
-                        args.abort_on_force_greater_than,
-                        cheatcode_force_abort_phases,
-                    )
-                ):
-                    print(
-                        f"[auto_record] CheatCode force > {args.abort_on_force_greater_than}N "
-                        f"(after successful tare; phase filter active); discarding episode (Left).",
-                        flush=True,
-                    )
-                    force_aborted = True
                     break
                 if time.monotonic() - t0 > args.max_episode_seconds:
                     print("[auto_record] Episode timeout", flush=True)
@@ -1068,13 +1068,7 @@ def main() -> int:
                 )
         else:
             _press_key("left")
-            if force_aborted:
-                print(
-                    "[auto_record] Episode restarted (Left): high CheatCode force in early phase. "
-                    "Next loop iteration will reset spawn / home per script settings.",
-                    flush=True,
-                )
-            else:
+            if not force_aborted:
                 print(
                     "[auto_record] Discarding episode (Left): lerobot-record should drop this run; "
                     "if an episode folder still appears, delete it with lerobot-edit-dataset.",
