@@ -51,7 +51,7 @@
 #   then continues forever with random board/spawn like --episode-mode random, but 2/3 nic_card_mount
 #   vs 1/3 sc_port). Override count with --max-episodes N.
 #           --on-home-failure exit --home-failure-shell 'your_restart_snippet.sh'
-# Focus the lerobot-record terminal for pynput Right/Left keys.
+# Focus the lerobot-record terminal so pynput can send Right (save); discards use SIGTERM/SIGKILL.
 #
 # See: https://github.com/intrinsic-dev/aic/blob/main/aic_bringup/README.md
 #      https://github.com/intrinsic-dev/aic/blob/main/docs/scene_description.md
@@ -532,6 +532,21 @@ def _is_success_line(line: str) -> bool:
     return any(p in line for p in _SUCCESS_PATTERNS)
 
 
+def _lerobot_logs_in_process_rerecord(line: str) -> bool:
+    """LeRobot handled Left: same lerobot-record process discards and starts another inner episode.
+
+    That does not return control to auto_record; we kill the pipeline so the outer loop can run
+    delete/spawn/home and a fresh lerobot-record. Matches the log line from the patched listener
+    and/or the follow-up 'Re-record episode' INFO line.
+    """
+    low = line.lower()
+    if "re-record episode" in low or "rerecord episode" in low:
+        return True
+    if "left arrow key pressed" in low and "rerecord" in low:
+        return True
+    return False
+
+
 def _parse_plug_z_actual(line: str) -> float | None:
     """Parse plug_z_actual from a CheatCode status line (see aic_teleop.py _obs_callback)."""
     if "[CheatCode]" not in line:
@@ -696,7 +711,8 @@ def main() -> int:
         "--max-episode-seconds",
         type=float,
         default=600.0,
-        help="After this duration without success, send Left and kill record.",
+        help="After this duration without success, terminate lerobot-record and start the next "
+        "outer episode (no Left — Left only re-records inside LeRobot).",
     )
     ap.add_argument(
         "--nic-plug-name",
@@ -724,11 +740,9 @@ def main() -> int:
         "--abort-on-force-greater-than",
         type=float,
         default=20.0,
-        help="When CheatCode logs Force (N) >= this on a line with a phase, discard the episode: "
-        "best-effort Left, then terminate lerobot-record (piped stdout is often fully buffered "
-        "without PYTHONUNBUFFERED=1 on the child; Left from another process may not reach "
-        "lerobot-record's listener). Next loop iteration resets spawn/home per script. Scoped by "
-        "--abort-force-phases (default ALL phases).",
+        help="When CheatCode logs Force (N) >= this on a line with a phase, terminate lerobot-record "
+        "so this script runs the next outer episode (spawn/home/record). Does not send Left — Left "
+        "only re-records inside LeRobot. Scoped by --abort-force-phases (default ALL phases).",
     )
     ap.add_argument(
         "--no-abort-on-high-cheatcode-force",
@@ -740,7 +754,7 @@ def main() -> int:
         default="ALL",
         help="Comma-separated CheatCode phases for force abort (e.g. APPROACH,ALIGN), or ALL for "
         "every phase including INSERT. Default ALL: any force above --abort-on-force-greater-than "
-        "discards the episode (Left). Narrow phases if you only want early-phase aborts.",
+        "discards the episode (terminate child, no Left). Narrow phases if you only want early-phase aborts.",
     )
     ap.add_argument(
         "--sc-plug-name",
@@ -893,7 +907,7 @@ def main() -> int:
         "2) Each episode (default): delete board/cable -> optional pre-spawn shell -> home arm "
         "(joints via /scoring/reset_joints; the ur5e Gazebo model is not respawned) -> "
         "spawn_task_board + spawn_cable -> tare -> lerobot-record.\n"
-        "3) Focus the terminal running lerobot-record so pynput can send Right/Left.\n"
+        "3) Focus the terminal running lerobot-record so pynput can send Right (save).\n"
         "4) If deletes miss a model name, extend --delete-entity-names or add --pre-spawn-shell.\n"
         "5) SwitchController timeout uses builtin_interfaces/Duration (required on Kilted+).\n"
         "6) If the arm stays in the previous pose, check logs for home_robot failures; tune "
@@ -1050,6 +1064,8 @@ def main() -> int:
         assert proc.stdout is not None
         success = False
         force_aborted = False
+        inner_rerecord = False
+        timed_out = False
         t0 = time.monotonic()
         is_nic_episode = mod.startswith("nic_card_mount_")
         require_insert = not args.nic_success_any_phase
@@ -1066,7 +1082,8 @@ def main() -> int:
                 ):
                     print(
                         f"[auto_record] CheatCode force >= {args.abort_on_force_greater_than}N; "
-                        "discarding episode (Left + terminate child). Next iteration resets spawn/home.",
+                        "terminating lerobot-record (no Left — Left only re-records inside LeRobot). "
+                        "Next iteration: outer reset (spawn/home/record).",
                         flush=True,
                     )
                     force_aborted = True
@@ -1090,8 +1107,18 @@ def main() -> int:
                     )
                     success = True
                     break
+                if _lerobot_logs_in_process_rerecord(line):
+                    print(
+                        "[auto_record] LeRobot Left / in-process re-record detected in logs; "
+                        "terminating lerobot-record so the next *outer* episode runs (board delete, "
+                        "home, spawn, fresh record).",
+                        flush=True,
+                    )
+                    inner_rerecord = True
+                    break
                 if time.monotonic() - t0 > args.max_episode_seconds:
                     print("[auto_record] Episode timeout", flush=True)
+                    timed_out = True
                     break
         except KeyboardInterrupt:
             if proc.poll() is None:
@@ -1125,22 +1152,26 @@ def main() -> int:
                     flush=True,
                 )
         else:
-            _press_key("left")
-            if not force_aborted:
+            if timed_out:
                 print(
-                    "[auto_record] Discarding episode (Left): lerobot-record should drop this run; "
-                    "if an episode folder still appears, delete it with lerobot-edit-dataset.",
+                    "[auto_record] Episode timeout; terminating lerobot-record for next outer episode.",
                     flush=True,
                 )
-            # Force-abort: pynput from this parent often does not reach lerobot-record's in-process
-            # listener (focus / synthetic events). Stop recording by terminating the child promptly.
-            discard_sleep = 0.06 if force_aborted else 0.4
+            elif not (inner_rerecord or force_aborted):
+                print(
+                    "[auto_record] Discarding episode; terminating lerobot-record (no Left — Left "
+                    "only re-records inside LeRobot). Next iteration resets spawn/home.",
+                    flush=True,
+                )
+            discard_sleep = (
+                0.06 if (force_aborted or inner_rerecord) else (0.25 if timed_out else 0.4)
+            )
             time.sleep(discard_sleep)
             _drain_subprocess_stdout(proc)
             if proc.poll() is None:
                 _terminate_record_tree(proc)
                 try:
-                    proc.wait(timeout=20.0 if not force_aborted else 8.0)
+                    proc.wait(timeout=8.0 if (force_aborted or inner_rerecord) else 20.0)
                 except subprocess.TimeoutExpired:
                     _kill_record_tree(proc)
 
