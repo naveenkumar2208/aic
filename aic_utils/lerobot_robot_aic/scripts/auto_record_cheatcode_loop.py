@@ -51,7 +51,8 @@
 #   then continues forever with random board/spawn like --episode-mode random, but 2/3 nic_card_mount
 #   vs 1/3 sc_port). Override count with --max-episodes N.
 #           --on-home-failure exit --home-failure-shell 'your_restart_snippet.sh'
-# Focus the lerobot-record terminal so pynput can send Right (save); discards use SIGTERM/SIGKILL.
+# Focus terminal for pynput Right (save). Press Left anytime to cancel the current record run and
+# jump to the next outer episode (delete/spawn/home) when the global Left listener is active.
 #
 # See: https://github.com/intrinsic-dev/aic/blob/main/aic_bringup/README.md
 #      https://github.com/intrinsic-dev/aic/blob/main/docs/scene_description.md
@@ -70,6 +71,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -494,6 +496,55 @@ def _press_key(key_name: str) -> None:
         )
 
 
+class OuterLeftCancelWatcher:
+    """Global Left key → cancel current lerobot-record (does not rely on child stdout)."""
+
+    def __init__(self) -> None:
+        self._cancel = threading.Event()
+        self._listener = None
+
+    def start(self, enable: bool) -> None:
+        self.stop()
+        self._cancel.clear()
+        if not enable:
+            return
+        try:
+            from pynput import keyboard
+            from pynput.keyboard import Key
+        except ImportError:
+            print(
+                "[auto_record] pynput not available: Left-key outer cancel disabled (install pynput).",
+                flush=True,
+            )
+            return
+
+        def on_press(key: object) -> None:
+            try:
+                if key == Key.left:
+                    self._cancel.set()
+            except Exception:
+                pass
+
+        try:
+            self._listener = keyboard.Listener(on_press=on_press)
+            self._listener.start()
+        except Exception as e:
+            print(f"[auto_record] Could not start Left listener ({e}).", flush=True)
+            self._listener = None
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+                self._listener.join(timeout=2.0)
+            except Exception:
+                pass
+            self._listener = None
+
+    def requested(self) -> bool:
+        return self._cancel.is_set()
+
+
 def _episode_teleop_config(
     kind: str, index: int, nic_plug: str, sc_plug: str
 ) -> tuple[str, str, str, str, str]:
@@ -773,6 +824,11 @@ def main() -> int:
         "discards the episode (terminate child, no Left). Narrow phases if you only want early-phase aborts.",
     )
     ap.add_argument(
+        "--no-outer-left-cancel-listener",
+        action="store_true",
+        help="Disable global Left-key listener that kills lerobot-record and starts the next outer episode.",
+    )
+    ap.add_argument(
         "--sc-plug-name",
         default="sc_tip",
         help="CheatCode task_plug_name for SC episodes.",
@@ -950,7 +1006,8 @@ def main() -> int:
         "2) Each episode (default): delete board/cable -> optional pre-spawn shell -> home arm "
         "(joints via /scoring/reset_joints; the ur5e Gazebo model is not respawned) -> "
         "spawn_task_board + spawn_cable -> tare -> lerobot-record.\n"
-        "3) Focus the terminal running lerobot-record so pynput can send Right (save).\n"
+        "3) Focus the terminal running lerobot-record for pynput Right (save). Press Left to abort "
+        "the current run and start the next outer episode (global listener).\n"
         "4) If deletes miss a model name, extend --delete-entity-names or add --pre-spawn-shell.\n"
         "5) SwitchController timeout uses builtin_interfaces/Duration (required on Kilted+).\n"
         "6) If the arm stays in the previous pose, check logs for home_robot failures; tune "
@@ -963,6 +1020,8 @@ def main() -> int:
             "then weighted-random layout (2/3 NIC, 1/3 SC) until stopped.\n",
             flush=True,
         )
+
+    left_watch = OuterLeftCancelWatcher()
 
     episode = 0
     while True:
@@ -1108,6 +1167,7 @@ def main() -> int:
         success = False
         force_aborted = False
         inner_rerecord = False
+        left_outer_abort = False
         timed_out = False
         t0 = time.monotonic()
         is_nic_episode = mod.startswith("nic_card_mount_")
@@ -1124,8 +1184,17 @@ def main() -> int:
             except (AttributeError, OSError, ValueError):
                 stdout_selectable = False
 
+        left_watch.start(not args.no_outer_left_cancel_listener)
         try:
             while True:
+                if left_watch.requested():
+                    print(
+                        "[auto_record] Left key: stopping this lerobot-record immediately; "
+                        "next outer episode (delete/spawn/home/record).",
+                        flush=True,
+                    )
+                    left_outer_abort = True
+                    break
                 if time.monotonic() - t0 >= args.max_episode_seconds:
                     print(
                         f"[auto_record] Episode wall-clock limit ({args.max_episode_seconds:g}s) reached; "
@@ -1212,6 +1281,8 @@ def main() -> int:
             if proc.poll() is None:
                 _terminate_record_tree(proc)
             raise
+        finally:
+            left_watch.stop()
 
         if success:
             print(
@@ -1242,21 +1313,27 @@ def main() -> int:
         else:
             if timed_out:
                 pass  # wall-clock limit already logged in read loop
-            elif not (inner_rerecord or force_aborted):
+            elif not (inner_rerecord or force_aborted or left_outer_abort):
                 print(
                     "[auto_record] Discarding episode; terminating lerobot-record (no Left — Left "
                     "only re-records inside LeRobot). Next iteration resets spawn/home.",
                     flush=True,
                 )
             discard_sleep = (
-                0.06 if (force_aborted or inner_rerecord) else (0.25 if timed_out else 0.4)
+                0.06
+                if (force_aborted or inner_rerecord or left_outer_abort)
+                else (0.25 if timed_out else 0.4)
             )
             time.sleep(discard_sleep)
             _drain_subprocess_stdout(proc)
             if proc.poll() is None:
                 _terminate_record_tree(proc)
                 try:
-                    proc.wait(timeout=8.0 if (force_aborted or inner_rerecord) else 20.0)
+                    proc.wait(
+                        timeout=8.0
+                        if (force_aborted or inner_rerecord or left_outer_abort)
+                        else 20.0
+                    )
                 except subprocess.TimeoutExpired:
                     _kill_record_tree(proc)
 
