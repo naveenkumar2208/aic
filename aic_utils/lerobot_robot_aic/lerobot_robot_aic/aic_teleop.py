@@ -523,22 +523,11 @@ class AICCheatCodeTeleopConfig(TeleoperatorConfig):
     # Right/Esc: zero motion via LeRobot's listener (lerobot-record). ']' re-arms. Disable: false.
     enable_operator_stop_keys: bool = True
 
-    # Frame of linear/angular velocity keys in get_action() / MotionUpdate (must match
-    # --robot.teleop_frame_id). CheatCode always *computes* PI in base_link ("world"); by
-    # default it rotates that twist into gripper/tcp for teleop. Use base_link here to
-    # record/train the same convention as aic_model RunACT (MotionUpdate header base_link).
-    cartesian_output_frame: str = "gripper/tcp"
-
 
 class AICCheatCodeTeleop(Teleoperator):
     def __init__(self, config: AICCheatCodeTeleopConfig):
         super().__init__(config)
         self.config = config
-        if config.cartesian_output_frame not in ("gripper/tcp", "base_link"):
-            raise ValueError(
-                f"cartesian_output_frame must be 'gripper/tcp' or 'base_link', "
-                f"got {config.cartesian_output_frame!r}"
-            )
         self._is_connected = False
 
         # State machine: INIT -> APPROACH -> ALIGN -> INSERT -> DONE | STOPPED (operator)
@@ -630,9 +619,7 @@ class AICCheatCodeTeleop(Teleoperator):
         _register_cheatcode_keyboard_target(self)
         print(
             f"\n\nCheatCode Teleop connected. "
-            f"Target: {self.config.task_port_name} on {self.config.task_module_name}\n"
-            f"  cartesian_output_frame={self.config.cartesian_output_frame!r} — "
-            f"set --robot.teleop_frame_id to the same value for correct control + dataset."
+            f"Target: {self.config.task_port_name} on {self.config.task_module_name}"
         )
         if self.config.enable_operator_stop_keys and _lerobot_record_keyboard_patched:
             print(
@@ -945,21 +932,17 @@ class AICCheatCodeTeleop(Teleoperator):
             cfg.max_angular_vel,
         )
 
-        if self.config.cartesian_output_frame == "base_link":
-            v_out_linear = v_linear_world
-            v_out_angular = v_angular_world
-        else:
-            # Transform world-frame velocities into TCP-frame velocities
-            v_out_linear = r_current.inv().apply(v_linear_world)
-            v_out_angular = r_current.inv().apply(v_angular_world)
+        # Transform world-frame velocities into TCP-frame velocities
+        v_linear_tcp = r_current.inv().apply(v_linear_world)
+        v_angular_tcp = r_current.inv().apply(v_angular_world)
 
         self._current_actions = {
-            "linear.x": float(v_out_linear[0]),
-            "linear.y": float(v_out_linear[1]),
-            "linear.z": float(v_out_linear[2]),
-            "angular.x": float(v_out_angular[0]),
-            "angular.y": float(v_out_angular[1]),
-            "angular.z": float(v_out_angular[2]),
+            "linear.x": float(v_linear_tcp[0]),
+            "linear.y": float(v_linear_tcp[1]),
+            "linear.z": float(v_linear_tcp[2]),
+            "angular.x": float(v_angular_tcp[0]),
+            "angular.y": float(v_angular_tcp[1]),
+            "angular.z": float(v_angular_tcp[2]),
         }
 
         self._last_action_time = current_time
