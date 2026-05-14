@@ -569,6 +569,18 @@ def _nic_plug_z_depth_success(
     return z <= z_at_most
 
 
+def _sc_plug_z_band_success(
+    line: str, z_min: float, z_max: float, require_insert_phase: bool
+) -> bool:
+    """SC port: success when plug_z_actual lies in [z_min, z_max] (small positive at full seating)."""
+    if require_insert_phase and "Phase: INSERT" not in line:
+        return False
+    z = _parse_plug_z_actual(line)
+    if z is None:
+        return False
+    return z_min <= z <= z_max
+
+
 def _parse_cheatcode_force_n(line: str) -> float | None:
     """Parse Force (Newtons) from a CheatCode _obs_callback line."""
     if "[CheatCode]" not in line:
@@ -762,6 +774,30 @@ def main() -> int:
         help="CheatCode task_plug_name for SC episodes.",
     )
     ap.add_argument(
+        "--sc-success-plug-z-min",
+        type=float,
+        default=6.0e-5,
+        help="SC episodes only: save (Right) when plug_z_actual is in [min, max] on a [CheatCode] line "
+        "(default band ~7e-5 per successful INSERT logs). Requires INSERT unless "
+        "--sc-success-any-phase.",
+    )
+    ap.add_argument(
+        "--sc-success-plug-z-max",
+        type=float,
+        default=8.5e-5,
+        help="SC episodes only: upper bound for plug_z_actual band (see --sc-success-plug-z-min).",
+    )
+    ap.add_argument(
+        "--sc-success-disable-plug-z",
+        action="store_true",
+        help="SC only: ignore plug_z band; wait for Phase: DONE / insertion strings only.",
+    )
+    ap.add_argument(
+        "--sc-success-any-phase",
+        action="store_true",
+        help="SC only: allow plug_z band match outside INSERT (default: require Phase: INSERT).",
+    )
+    ap.add_argument(
         "--no-resume",
         action="store_true",
         help="Omit --resume=true on lerobot-record.",
@@ -879,6 +915,9 @@ def main() -> int:
 
     if not args.dataset_root:
         ap.error("--dataset-root (or LEROBOT_DATASET_ROOT) is required")
+
+    if args.sc_success_plug_z_min > args.sc_success_plug_z_max:
+        ap.error("--sc-success-plug-z-min must be <= --sc-success-plug-z-max")
 
     setup = os.path.abspath(os.path.expanduser(args.install_setup))
     if not os.path.isfile(setup):
@@ -1068,7 +1107,9 @@ def main() -> int:
         timed_out = False
         t0 = time.monotonic()
         is_nic_episode = mod.startswith("nic_card_mount_")
+        is_sc_episode = mod.startswith("sc_port_")
         require_insert = not args.nic_success_any_phase
+        require_sc_insert = not args.sc_success_any_phase
         try:
             for line in proc.stdout:
                 sys.stdout.write(line)
@@ -1102,6 +1143,23 @@ def main() -> int:
                 ):
                     print(
                         "[auto_record] NIC plug_z_actual threshold reached; "
+                        "treating as success (Right).",
+                        flush=True,
+                    )
+                    success = True
+                    break
+                if (
+                    is_sc_episode
+                    and not args.sc_success_disable_plug_z
+                    and _sc_plug_z_band_success(
+                        line,
+                        args.sc_success_plug_z_min,
+                        args.sc_success_plug_z_max,
+                        require_insert_phase=require_sc_insert,
+                    )
+                ):
+                    print(
+                        "[auto_record] SC plug_z_actual in success band; "
                         "treating as success (Right).",
                         flush=True,
                     )
