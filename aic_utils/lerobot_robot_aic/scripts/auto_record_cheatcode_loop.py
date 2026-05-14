@@ -536,13 +536,15 @@ def _lerobot_logs_in_process_rerecord(line: str) -> bool:
     """LeRobot handled Left: same lerobot-record process discards and starts another inner episode.
 
     That does not return control to auto_record; we kill the pipeline so the outer loop can run
-    delete/spawn/home and a fresh lerobot-record. Matches the log line from the patched listener
-    and/or the follow-up 'Re-record episode' INFO line.
+    delete/spawn/home and a fresh lerobot-record. Matches the patched listener text even when glued
+    to the next log line without a newline.
     """
     low = line.lower()
     if "re-record episode" in low or "rerecord episode" in low:
         return True
-    if "left arrow key pressed" in low and "rerecord" in low:
+    if "exiting loop and rerecord" in low:
+        return True
+    if "left arrow key pressed" in low:
         return True
     return False
 
@@ -722,9 +724,11 @@ def main() -> int:
     ap.add_argument(
         "--max-episode-seconds",
         type=float,
-        default=600.0,
-        help="After this duration without success, terminate lerobot-record and start the next "
-        "outer episode (no Left — Left only re-records inside LeRobot).",
+        default=60.0,
+        help="Wall-clock limit per lerobot-record run: if no success by then, terminate the child "
+        "and start the next outer episode (discard). Default 60. Use a larger value (e.g. 600) for "
+        "slow episodes. On POSIX, select(2) is used between readline calls so the limit is not "
+        "delayed indefinitely when the child prints nothing.",
     )
     ap.add_argument(
         "--nic-plug-name",
@@ -1110,8 +1114,38 @@ def main() -> int:
         is_sc_episode = mod.startswith("sc_port_")
         require_insert = not args.nic_success_any_phase
         require_sc_insert = not args.sc_success_any_phase
+
+        raw_out = proc.stdout
+        stdout_selectable = False
+        if os.name == "posix":
+            try:
+                raw_out.fileno()
+                stdout_selectable = True
+            except (AttributeError, OSError, ValueError):
+                stdout_selectable = False
+
         try:
-            for line in proc.stdout:
+            while True:
+                if time.monotonic() - t0 >= args.max_episode_seconds:
+                    print(
+                        f"[auto_record] Episode wall-clock limit ({args.max_episode_seconds:g}s) reached; "
+                        "terminating lerobot-record (discard) and starting next outer episode.",
+                        flush=True,
+                    )
+                    timed_out = True
+                    break
+                if stdout_selectable:
+                    remain = args.max_episode_seconds - (time.monotonic() - t0)
+                    timeout = min(0.25, max(0.0, remain))
+                    try:
+                        rlist, _, _ = select.select([raw_out], [], [], timeout)
+                    except (ValueError, OSError, InterruptedError):
+                        rlist = [raw_out]
+                    if raw_out not in rlist:
+                        continue
+                line = raw_out.readline()
+                if line == "":
+                    break
                 sys.stdout.write(line)
                 sys.stdout.flush()
                 # Force abort before success: high force must discard even if the same line
@@ -1174,10 +1208,6 @@ def main() -> int:
                     )
                     inner_rerecord = True
                     break
-                if time.monotonic() - t0 > args.max_episode_seconds:
-                    print("[auto_record] Episode timeout", flush=True)
-                    timed_out = True
-                    break
         except KeyboardInterrupt:
             if proc.poll() is None:
                 _terminate_record_tree(proc)
@@ -1211,10 +1241,7 @@ def main() -> int:
                 )
         else:
             if timed_out:
-                print(
-                    "[auto_record] Episode timeout; terminating lerobot-record for next outer episode.",
-                    flush=True,
-                )
+                pass  # wall-clock limit already logged in read loop
             elif not (inner_rerecord or force_aborted):
                 print(
                     "[auto_record] Discarding episode; terminating lerobot-record (no Left — Left "
