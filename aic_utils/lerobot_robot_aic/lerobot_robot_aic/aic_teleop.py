@@ -591,6 +591,12 @@ class AICCheatCodeTeleop(Teleoperator):
         if not rclpy.ok():
             rclpy.init()
 
+        for _stream in (sys.stdout, sys.stderr):
+            try:
+                _stream.reconfigure(line_buffering=True)
+            except (AttributeError, OSError, ValueError):
+                pass
+
         self._node = rclpy.create_node("cheatcode_teleop")
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self._node)

@@ -67,9 +67,45 @@ import random
 import re
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
+
+
+def _record_cmd_stdio_wrapper(cmd: list[str]) -> list[str]:
+    """If GNU stdbuf exists, prefix cmd so libc stdio is unbuffered (helps piped pixi / lerobot)."""
+    if os.name != "posix":
+        return cmd
+    stdbuf = shutil.which("stdbuf")
+    if not stdbuf:
+        return cmd
+    return [stdbuf, "-o0", "-e0", *cmd]
+
+
+def _terminate_record_tree(proc: subprocess.Popen) -> None:
+    """SIGTERM the whole record pipeline (pixi + lerobot-record), not only the top-level PID."""
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    proc.terminate()
+
+
+def _kill_record_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    proc.kill()
 
 
 def _bool_args(prefix: str, n: int, true_index: int | None) -> list[str]:
@@ -993,6 +1029,7 @@ def main() -> int:
             task,
             resume=not args.no_resume,
         )
+        record_cmd = _record_cmd_stdio_wrapper(record_cmd)
         print(f"[auto_record] Popen: {' '.join(record_cmd)}", flush=True)
 
         # Child stdout is a pipe (not a TTY) → Python block-buffering unless unbuffered; without
@@ -1000,6 +1037,7 @@ def main() -> int:
         # would fire far too late or never during a long episode.
         record_env = {**env, "PYTHONUNBUFFERED": "1"}
 
+        # New session so os.killpg(proc.pid, …) only tears down pixi + lerobot-record, not this script.
         proc = subprocess.Popen(
             record_cmd,
             stdout=subprocess.PIPE,
@@ -1007,6 +1045,7 @@ def main() -> int:
             env=record_env,
             text=True,
             bufsize=1,
+            start_new_session=os.name == "posix",
         )
         assert proc.stdout is not None
         success = False
@@ -1056,7 +1095,7 @@ def main() -> int:
                     break
         except KeyboardInterrupt:
             if proc.poll() is None:
-                proc.terminate()
+                _terminate_record_tree(proc)
             raise
 
         if success:
@@ -1074,11 +1113,11 @@ def main() -> int:
                 proc.wait(timeout=120.0)
             except subprocess.TimeoutExpired:
                 print("[auto_record] lerobot-record still running after success; terminating.", flush=True)
-                proc.terminate()
+                _terminate_record_tree(proc)
                 try:
                     proc.wait(timeout=20.0)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _kill_record_tree(proc)
             if proc.returncode:
                 print(
                     f"[auto_record] WARNING: lerobot-record exited with code {proc.returncode}; "
@@ -1099,11 +1138,11 @@ def main() -> int:
             time.sleep(discard_sleep)
             _drain_subprocess_stdout(proc)
             if proc.poll() is None:
-                proc.terminate()
+                _terminate_record_tree(proc)
                 try:
                     proc.wait(timeout=20.0 if not force_aborted else 8.0)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _kill_record_tree(proc)
 
         time.sleep(max(0.0, args.post_episode_sleep))
 
