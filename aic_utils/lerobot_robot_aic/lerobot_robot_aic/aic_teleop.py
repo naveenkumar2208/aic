@@ -644,7 +644,8 @@ class AICCheatCodeTeleop(Teleoperator):
         print(
             f"[CheatCode] Force: {self._latest_force_mag:.1f}N | "
             f"Phase: {self.phase} | z_off: {self.z_offset:.4f} | "
-            f"plug_z_actual: {self._actual_plug_port_z}"
+            f"plug_z_actual: {self._actual_plug_port_z}",
+            flush=True,
         )
 
     @property

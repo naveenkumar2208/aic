@@ -554,7 +554,8 @@ def _cheatcode_force_abort(
     f = _parse_cheatcode_force_n(line)
     if f is None:
         return False
-    return f > threshold_n
+    # >= so "20N limit" includes exactly 20.0N (CheatCode logs one decimal).
+    return f >= threshold_n
 
 
 def _parse_abort_force_phases(s: str) -> frozenset[str] | None:
@@ -687,8 +688,10 @@ def main() -> int:
         "--abort-on-force-greater-than",
         type=float,
         default=20.0,
-        help="When CheatCode logs Force (N) above this on a line with a phase, send Left immediately "
-        "and discard; next loop iteration resets spawn/home per script. Scoped by "
+        help="When CheatCode logs Force (N) >= this on a line with a phase, discard the episode: "
+        "best-effort Left, then terminate lerobot-record (piped stdout is often fully buffered "
+        "without PYTHONUNBUFFERED=1 on the child; Left from another process may not reach "
+        "lerobot-record's listener). Next loop iteration resets spawn/home per script. Scoped by "
         "--abort-force-phases (default ALL phases).",
     )
     ap.add_argument(
@@ -981,11 +984,16 @@ def main() -> int:
         )
         print(f"[auto_record] Popen: {' '.join(record_cmd)}", flush=True)
 
+        # Child stdout is a pipe (not a TTY) → Python block-buffering unless unbuffered; without
+        # this, [CheatCode] lines may not reach this parent until the buffer fills and force-abort
+        # would fire far too late or never during a long episode.
+        record_env = {**env, "PYTHONUNBUFFERED": "1"}
+
         proc = subprocess.Popen(
             record_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=env,
+            env=record_env,
             text=True,
             bufsize=1,
         )
@@ -1007,8 +1015,8 @@ def main() -> int:
                     cheatcode_force_abort_phases,
                 ):
                     print(
-                        f"[auto_record] CheatCode force > {args.abort_on_force_greater_than}N; "
-                        "discarding episode (Left). Next iteration resets spawn/home per script.",
+                        f"[auto_record] CheatCode force >= {args.abort_on_force_greater_than}N; "
+                        "discarding episode (Left + terminate child). Next iteration resets spawn/home.",
                         flush=True,
                     )
                     force_aborted = True
@@ -1074,12 +1082,15 @@ def main() -> int:
                     "if an episode folder still appears, delete it with lerobot-edit-dataset.",
                     flush=True,
                 )
-            time.sleep(0.4)
+            # Force-abort: pynput from this parent often does not reach lerobot-record's in-process
+            # listener (focus / synthetic events). Stop recording by terminating the child promptly.
+            discard_sleep = 0.06 if force_aborted else 0.4
+            time.sleep(discard_sleep)
             _drain_subprocess_stdout(proc)
             if proc.poll() is None:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=20.0)
+                    proc.wait(timeout=20.0 if not force_aborted else 8.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
 
