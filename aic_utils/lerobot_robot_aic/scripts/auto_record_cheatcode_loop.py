@@ -47,9 +47,9 @@
 # If ROS runs only inside the same container as Terminal A, use that install path, e.g.
 #   --install-setup /ws_aic/install/setup.bash
 #
-# Optional: --episode-mode training333 --max-episodes 99  (first 99: three fixed trials 1/3 each;
+# Optional: --episode-mode training333  (omit --max-episodes → 33 fixed-trial episodes, 1/3 each trial;
 #   then continues forever with random board/spawn like --episode-mode random, but 2/3 nic_card_mount
-#   vs 1/3 sc_port episodes)
+#   vs 1/3 sc_port). Override count with --max-episodes N.
 #           --on-home-failure exit --home-failure-shell 'your_restart_snippet.sh'
 # Focus the lerobot-record terminal for pynput Right/Left keys.
 #
@@ -796,16 +796,18 @@ def main() -> int:
         "with equal probability (2/3 NIC-style trials + 1/3 SC trial) using fixed board/rails/cable "
         "from the three training recipes embedded in this script. If --max-episodes is set with "
         "training333, that many curriculum episodes run first, then recording continues in random "
-        "layout with 2/3 NIC vs 1/3 SC.",
+        "layout with 2/3 NIC vs 1/3 SC. If training333 and --max-episodes is omitted, 33 curriculum "
+        "episodes are used before that random phase.",
     )
     ap.add_argument(
         "--max-episodes",
         type=int,
         default=None,
-        help="With --episode-mode random: exit after this many episodes. "
+        help="With --episode-mode random: exit after this many episodes (default: no cap, run forever). "
         "With --episode-mode training333: run this many fixed-trial episodes, then keep recording "
         "with random board/spawn (same as random mode) but each episode is 2/3 nic_card_mount vs "
-        "1/3 sc_port (no exit). Default: run forever in the chosen mode.",
+        "1/3 sc_port (no exit). If training333 and this flag is omitted, the curriculum length defaults "
+        "to 33 episodes.",
     )
     ap.add_argument(
         "--on-home-failure",
@@ -821,6 +823,9 @@ def main() -> int:
         "a container restart or notify script.",
     )
     args = ap.parse_args()
+
+    if args.episode_mode == "training333" and args.max_episodes is None:
+        args.max_episodes = 33
 
     if not args.dataset_root:
         ap.error("--dataset-root (or LEROBOT_DATASET_ROOT) is required")
@@ -859,6 +864,12 @@ def main() -> int:
         "--home-sleep-after-deactivate / --home-sleep-after-reset / --post-episode-sleep.\n",
         flush=True,
     )
+    if args.episode_mode == "training333":
+        print(
+            f"[auto_record] training333: {args.max_episodes} curriculum episode(s), "
+            "then weighted-random layout (2/3 NIC, 1/3 SC) until stopped.\n",
+            flush=True,
+        )
 
     episode = 0
     while True:
