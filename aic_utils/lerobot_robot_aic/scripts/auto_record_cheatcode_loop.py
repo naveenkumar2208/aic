@@ -1319,23 +1319,37 @@ def main() -> int:
                     "only re-records inside LeRobot). Next iteration resets spawn/home.",
                     flush=True,
                 )
+            # Never drain stdout before killing the child: a live lerobot-record would keep
+            # writing lines and this loop would block indefinitely while teeing to the terminal.
             discard_sleep = (
-                0.06
+                0.0
                 if (force_aborted or inner_rerecord or left_outer_abort)
-                else (0.25 if timed_out else 0.4)
+                else (0.1 if timed_out else 0.4)
             )
             time.sleep(discard_sleep)
-            _drain_subprocess_stdout(proc)
             if proc.poll() is None:
                 _terminate_record_tree(proc)
+            try:
+                proc.wait(
+                    timeout=5.0
+                    if (force_aborted or inner_rerecord or left_outer_abort or timed_out)
+                    else 25.0
+                )
+            except subprocess.TimeoutExpired:
+                print(
+                    "[auto_record] Record pipeline still alive after SIGTERM; sending SIGKILL.",
+                    flush=True,
+                )
+                _kill_record_tree(proc)
                 try:
-                    proc.wait(
-                        timeout=8.0
-                        if (force_aborted or inner_rerecord or left_outer_abort)
-                        else 20.0
-                    )
+                    proc.wait(timeout=8.0)
                 except subprocess.TimeoutExpired:
-                    _kill_record_tree(proc)
+                    print(
+                        "[auto_record] WARNING: record pipeline may still be running (pid "
+                        f"{proc.pid}); check with ps.",
+                        flush=True,
+                    )
+            _drain_subprocess_stdout(proc)
 
         time.sleep(max(0.0, args.post_episode_sleep))
 
