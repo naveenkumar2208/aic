@@ -1,3 +1,5 @@
+# Default: `docker compose up` runs eval + team_model (your ACT submission).
+# Example CheatCode image: `docker compose --profile example up`.
 name: aic
 services:
   eval:
@@ -10,11 +12,22 @@ services:
     gpus: all
     networks:
       - default
+    # Expose Zenoh router to the host so `pixi run ros2 run aic_model` can join the same
+    # graph as eval (the default network is internal:true and is not reachable from the host).
+    ports:
+      - "7447:7447"
     environment:
       AIC_EVAL_PASSWD: CHANGE_IN_PROD
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
-      # AIC_ENABLE_ACL: true
+      AIC_ENABLE_ACL: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 1 bash -c 'echo >/dev/tcp/127.0.0.1/7447'"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
   model:
+    profiles: ["example"]
     image: my-solution:v1
     build:
       dockerfile: docker/aic_model/Dockerfile
@@ -28,6 +41,28 @@ services:
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
+  # Team ACT submission image (bundled checkpoint). See docker/aic_team_model/Dockerfile.
+  team_model:
+    image: my-aic-act:v2
+    depends_on:
+      eval:
+        condition: service_healthy
+    build:
+      dockerfile: docker/aic_team_model/Dockerfile
+      context: ..
+      args:
+        CHECKPOINT_DIR: outputs/train/act_aic_sfp_127ep/checkpoints/040000/pretrained_model
+    gpus: all
+    networks:
+      - default
+    environment:
+      RMW_IMPLEMENTATION: rmw_zenoh_cpp
+      ZENOH_ROUTER_CHECK_ATTEMPTS: -1
+      AIC_ROUTER_ADDR: eval:7447
+      AIC_MODEL_ROUTER_ADDR: eval:7447
+      AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_ENABLE_ACL: "true"
+      AIC_ACT_POLICY_PRETRAINED_PATH: /ws_aic/policy/pretrained_model
 networks:
   default:
     internal: true

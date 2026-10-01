@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aic_team_policy</name>
+  <version>0.1.0</version>
+  <description>Team ACT policy for AIC cable insertion (submission package)</description>
+  <maintainer email="naveen@example.com">naveen</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>aic_control_interfaces</depend>
+  <depend>aic_example_policies</depend>
+  <depend>aic_model</depend>
+  <depend>aic_model_interfaces</depend>
+  <depend>aic_task_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rclpy</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
